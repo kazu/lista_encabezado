@@ -9,6 +9,7 @@ package list_head
 import (
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -168,10 +169,11 @@ const (
 )
 
 type ModeTraverse struct {
-	t      TraverseType
-	Mu     func(*ListHead) *sync.RWMutex
-	e      error
-	confMu sync.Mutex
+	t        TraverseType
+	Mu       func(*ListHead) *sync.RWMutex
+	e        error
+	confMu   sync.Mutex
+	fnOnMark func()
 }
 
 var DefaultModeTraverse *ModeTraverse = &ModeTraverse{t: TravDirect}
@@ -217,6 +219,16 @@ func (mt *ModeTraverse) Option(opts ...TravOpt) (prevs []TravOpt) {
 	return
 }
 
+func (mt *ModeTraverse) runOnMark() {
+
+	var mu sync.Mutex
+	mu.Lock()
+	mt.fnOnMark()
+	mt.fnOnMark = nil
+	mu.Unlock()
+	return
+}
+
 type TravOpt func(*ModeTraverse) TravOpt
 
 func Trav(t TraverseType) TravOpt {
@@ -247,6 +259,13 @@ func Lock(fn func(*ListHead) *sync.RWMutex) TravOpt {
 			return nil
 		}
 		return Lock(prev)
+	}
+}
+func RunOnMark(fn func()) TravOpt {
+	return func(m *ModeTraverse) TravOpt {
+		prev := m.fnOnMark
+		m.fnOnMark = fn
+		return RunOnMark(prev)
 	}
 }
 
@@ -1165,6 +1184,10 @@ func (l *ListHead) Delete() (result *ListHead) {
 
 func (l *ListHead) Empty() bool {
 	if MODE_CONCURRENT {
+		if l == nil {
+			fmt.Fprintf(os.Stderr, "Empty(): recover return true listhead == nil")
+			return true
+		}
 		return l.prev == l || l.next == l
 	}
 	return l.next == l
@@ -1321,38 +1344,35 @@ func (l *ListHead) frontCc() (head *ListHead) {
 	if start.Empty() && !start.Prev(WaitNoM()).Empty() {
 		start = start.Prev()
 	}
-	retry := 2
+	// retry := 2
 
-	cnt := -1
+	// cnt := -1
 	var next *ListHead
 	_ = next
 
 	isInfinit := map[*ListHead]int{}
-	for head, next = start, start; !head.Prev(WaitNoM()).Empty(); next, head = head, head.Prev(WaitNoM()) {
+
+RESTART:
+	for next, head = start, start.Prev(WaitNoM()); !head.Prev(WaitNoM()).Empty(); next, head = head, head.Prev(WaitNoM()) {
+
+	RETRY_IN_LOOP:
 		if head.IsMarked() {
-			retry = 2
-			head = next
-			goto RETRYMARKED
+			head = next.Prev(WaitNoM())
+			goto RETRY_IN_LOOP
 		}
+		if next.IsMarked() {
+			goto RESTART
+		}
+
 		if head.IsFirst() {
 			return head
 		}
 		if _, ok := isInfinit[head]; ok {
-			if retry < 1 {
-				// FIXME: log warning
-				_ = "infinit loop"
-			}
-			goto RETRY
+			isInfinit[head]++
+			goto RESTART
 		}
-		isInfinit[head] = cnt
-		continue
-	RETRY:
-		head = l
-		isInfinit = map[*ListHead]int{}
-	RETRYMARKED:
-		cnt = -1
-		retry--
 	}
+
 	return
 }
 
@@ -1450,6 +1470,11 @@ func (l *ListHead) Cursor() Cursor {
 }
 
 func (cur *Cursor) Next() bool {
+
+	if cur.Pos == nil {
+		fmt.Fprintf(os.Stderr, "WARM: cur.Pos msut not be nil")
+		return false
+	}
 
 	if cur.Pos == cur.Pos.Next() {
 		return false
@@ -1591,8 +1616,9 @@ func (head *ListHead) IsPurged() bool {
 		return false
 	}
 
-	return head.Prev().Next() != head
-
+	// FIXME:
+	//return head.Prev().Next() != head
+	return head.DirectPrev().DirectNext() != head
 }
 
 func (head *ListHead) Purge(opts ...func(*ListHead) error) (active *ListHead, purged *ListHead) {
@@ -1816,4 +1842,46 @@ func (head *ListHead) CountTo(dst *ListHead) (cnt int) {
 
 	return cnt
 
+}
+
+// Filter ... safety loop in list_head. debug mode.
+func (head *ListHead) Filter(fn func(cur, next *ListHead) bool) *ListHead {
+
+RETRY:
+	front := head.Front()
+	cur := front
+	next := cur.Next(WaitNoM())
+	cnt := 0
+	_ = cnt
+	curs := []uintptr{}
+	nexts := []uintptr{}
+	curs = append(curs, uintptr(unsafe.Pointer(cur)))
+	nexts = append(nexts, uintptr(unsafe.Pointer(next)))
+
+	for {
+	RETRY_IN_LOOP:
+		if fn(cur, next) {
+			return cur
+		}
+		if cur.Empty() {
+			break
+		}
+		cur, next = cur.Next(WaitNoM()), next.Next(WaitNoM())
+		curs = append(curs, uintptr(unsafe.Pointer(cur)))
+		nexts = append(nexts, uintptr(unsafe.Pointer(next)))
+		if cur == nil || cur.IsMarked() {
+			goto RETRY
+		}
+		if cur.IsMarked() && cur == front {
+			return nil
+		}
+
+		if next == nil || next.IsMarked() {
+			next = cur.Next(WaitNoM())
+			nexts = append(nexts, uintptr(unsafe.Pointer(next)))
+			goto RETRY_IN_LOOP
+		}
+		cnt++
+	}
+	return nil
 }
