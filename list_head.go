@@ -213,6 +213,9 @@ func (mt *ModeTraverse) Option(opts ...TravOpt) (prevs []TravOpt) {
 	var mu sync.Mutex
 	mu.Lock()
 	for _, opt := range opts {
+		if opt == nil {
+			continue
+		}
 		prevs = append(prevs, opt(mt))
 	}
 	mu.Unlock()
