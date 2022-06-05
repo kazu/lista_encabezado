@@ -737,7 +737,7 @@ func TestRaceCondtion(t *testing.T) {
 
 					next := atomic.LoadPointer((*unsafe.Pointer)(unsafe.Pointer(e.Prev().PtrNext())))
 					if uintptr(next)^1 > 0 {
-						fmt.Printf("markd %d\n", i-1)
+						//fmt.Printf("markd %d\n", i-1)
 					}
 				}
 			},
@@ -747,7 +747,7 @@ func TestRaceCondtion(t *testing.T) {
 					(*unsafe.Pointer)(unsafe.Pointer(e.PtrNext())),
 					unsafe.Pointer(e.DirectNext()),
 					unsafe.Pointer(uintptr(unsafe.Pointer(e.DirectNext()))|1)) {
-					fmt.Printf("success %d\n", i)
+					//fmt.Printf("success %d\n", i)
 				}
 			},
 		},
@@ -759,7 +759,7 @@ func TestRaceCondtion(t *testing.T) {
 
 					next := atomic.LoadPointer((*unsafe.Pointer)(unsafe.Pointer(e.Prev().PtrNext())))
 					if uintptr(next)^1 > 0 {
-						fmt.Printf("markd %d\n", i-1)
+						//fmt.Printf("markd %d\n", i-1)
 					}
 				}
 			},
@@ -814,7 +814,7 @@ func purgeResult(active *list_head.ListHead, purged *list_head.ListHead) (bool, 
 
 }
 
-func TestConcurrentLastAppend(t *testing.T) {
+func _TestConcurrentLastAppend(t *testing.T) {
 
 	list_head.MODE_CONCURRENT = true
 	const (
