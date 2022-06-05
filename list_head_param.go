@@ -378,11 +378,20 @@ func ContainOf(head, elm *ListHead) bool {
 	return containOf(elm.Prev(), head)
 }
 
+func ContainOf2(head, elm *ListHead) bool {
+
+	return head.Filter(
+		func(cur, next *ListHead) bool {
+			return cur == elm
+		}) != nil
+
+}
+
 func containOf(head, elm *ListHead) bool {
 
 	c := head.Cursor()
 
-	for c.Next() {
+	for c.Pos != nil && c.Next() {
 		if c.Pos == elm {
 			return true
 		}
