@@ -297,7 +297,7 @@ func prevDirect(head *ListHead) (prev *ListHead) {
 
 func prevWaitNoMark(head *ListHead) (prev *ListHead) {
 	var err error
-	prev = head.prev
+	prev = prevLoad(head)
 	for retry := 100; retry > 0; retry-- {
 		if !prev.IsMarked() {
 			err = nil
@@ -424,7 +424,7 @@ func prevDefault(head *ListHead, opts ...TravOpt) (prev *ListHead) {
 }
 
 func (head *ListHead) DirectNext() *ListHead {
-	return head.next
+	return nextLoad(head)
 }
 
 func (head *ListHead) PtrNext() **ListHead {
@@ -433,7 +433,7 @@ func (head *ListHead) PtrNext() **ListHead {
 }
 
 func (head *ListHead) DirectPrev() *ListHead {
-	return head.prev
+	return prevLoad(head)
 }
 
 type BoolAndError struct {
@@ -513,7 +513,7 @@ func nextLoad(head *ListHead) (next *ListHead) {
 
 func nextWaitNoMark(head *ListHead) (next *ListHead) {
 	var err error
-	next = head.next
+	next = nextLoad(head)
 	for retry := 100; retry > 0; retry-- {
 		if !next.IsMarked() {
 			err = nil
@@ -1800,10 +1800,10 @@ func (head *ListHead) findPrevNoM(exptected *ListHead) (*ListHead, int) {
 
 func (head *ListHead) IsMarked() bool {
 
-	if uintptr(unsafe.Pointer(head.prev))&1 > 0 {
+	if uintptr(unsafe.Pointer(prevLoad(head)))&1 > 0 {
 		return true
 	}
-	if uintptr(unsafe.Pointer(head.next))&1 > 0 {
+	if uintptr(unsafe.Pointer(nextLoad(head)))&1 > 0 {
 		return true
 	}
 	return false
