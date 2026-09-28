@@ -369,7 +369,11 @@ func ListPrev(head *ListHead, opts ...TravOpt) (prev *ListHead) {
 	// }
 	// return prevDefault(head, opts...)
 
-	switch traverseType(opts) {
+	t := DefaultModeTraverse.Type()
+	if len(opts) > 0 {
+		t = traverseType(opts)
+	}
+	switch t {
 	case TravDirect:
 		return prevDirect(head)
 	case TravWaitNoMark:
@@ -578,7 +582,11 @@ func (head *ListHead) Next(opts ...TravOpt) *ListHead {
 }
 
 func ListNext(head *ListHead, opts ...TravOpt) *ListHead {
-	switch traverseType(opts) {
+	t := DefaultModeTraverse.Type()
+	if len(opts) > 0 {
+		t = traverseType(opts)
+	}
+	switch t {
 	case TravDirect:
 		return nextDirect(head)
 	case TravWaitNoMark:
