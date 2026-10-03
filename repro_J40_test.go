@@ -7,7 +7,7 @@ import (
 	"sync"
 	"testing"
 
-	list_head "github.com/kazu/loncha/lista_encabezado"
+	list_head "github.com/kazu/lista_encabezado"
 )
 
 // Nodes p and a lie in this order between head and tail, and n and m are

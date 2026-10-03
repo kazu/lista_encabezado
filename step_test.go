@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	list_head "github.com/kazu/loncha/lista_encabezado"
+	list_head "github.com/kazu/lista_encabezado"
 )
 
 // stepper stops goroutines at the step points of lista_encabezado, so that a

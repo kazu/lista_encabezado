@@ -5,7 +5,7 @@ package list_head_test
 import (
 	"testing"
 
-	list_head "github.com/kazu/loncha/lista_encabezado"
+	list_head "github.com/kazu/lista_encabezado"
 )
 
 // Nodes p, a, b and q lie in this order between head and tail, and a and b

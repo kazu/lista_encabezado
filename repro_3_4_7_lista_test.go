@@ -6,7 +6,7 @@ import (
 	"testing"
 	"unsafe"
 
-	list_head "github.com/kazu/loncha/lista_encabezado"
+	list_head "github.com/kazu/lista_encabezado"
 )
 
 // Nodes x, l, n and s lie in this order between head and tail. Deleting l

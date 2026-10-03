@@ -7,7 +7,7 @@ import (
 	"testing"
 	"unsafe"
 
-	list_head "github.com/kazu/loncha/lista_encabezado"
+	list_head "github.com/kazu/lista_encabezado"
 )
 
 // The tests in this file take TestConcurrentAddAndDelete apart. Each one
@@ -273,4 +273,3 @@ func TestReproI9FrontFaultsOnMarkedLink(t *testing.T) {
 		t.Errorf("y.Front() = %p, want p %p", got, p)
 	}
 }
-

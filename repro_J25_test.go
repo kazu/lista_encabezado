@@ -6,7 +6,7 @@ import (
 	"runtime"
 	"testing"
 
-	list_head "github.com/kazu/loncha/lista_encabezado"
+	list_head "github.com/kazu/lista_encabezado"
 )
 
 // runWhileStopped runs fn in its own goroutine while another goroutine is

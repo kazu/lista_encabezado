@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"testing"
 
-	list_head "github.com/kazu/loncha/lista_encabezado"
+	list_head "github.com/kazu/lista_encabezado"
 )
 
 // newListaInsertDeleteList links p, a and y in this order between head and

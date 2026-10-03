@@ -5,7 +5,7 @@ package list_head_test
 import (
 	"testing"
 
-	list_head "github.com/kazu/loncha/lista_encabezado"
+	list_head "github.com/kazu/lista_encabezado"
 )
 
 // Nodes x, l and y lie in this order between head and tail. Deleting l stops

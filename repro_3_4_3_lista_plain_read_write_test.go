@@ -6,7 +6,7 @@ import (
 	"runtime"
 	"testing"
 
-	list_head "github.com/kazu/loncha/lista_encabezado"
+	list_head "github.com/kazu/lista_encabezado"
 )
 
 // runOneAfterOther runs first to its end and then second, each in its own

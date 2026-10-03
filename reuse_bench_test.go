@@ -3,7 +3,7 @@ package list_head_test
 import (
 	"testing"
 
-	list_head "github.com/kazu/loncha/lista_encabezado"
+	list_head "github.com/kazu/lista_encabezado"
 )
 
 func BenchmarkListReuse(b *testing.B) {
