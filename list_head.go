@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -134,11 +135,13 @@ func (head *ListHead) Init() {
 
 	start := NewEmpty()
 	end := NewEmpty()
-	head.prev = start
-	head.next = end
-
 	start.next = head
 	end.prev = head
+
+	// a reader may still load the links of head, as a Get of an item pool
+	// does while an expand runs Init on the old pool
+	StoreListHead(&head.prev, start)
+	StoreListHead(&head.next, end)
 }
 
 func (head *ListHead) InitAsEmpty() {
@@ -286,25 +289,30 @@ func InitAfterSafety(retry int) func(*ListHead) error {
 
 }
 
+// prevLoad and nextLoad load a link as it is, with the mark bit of a delete.
+//
+//go:nocheckptr
 func prevLoad(head *ListHead) (prev *ListHead) {
 	prev = (*ListHead)(atomic.LoadPointer((*unsafe.Pointer)(unsafe.Pointer(&head.prev))))
 	return prev
 }
 
+// prevDirect returns the node head.prev leads to, without the mark bit.
 func prevDirect(head *ListHead) (prev *ListHead) {
-	return prevLoad(head)
+	return nodePrev(head)
 }
 
 func prevWaitNoMark(head *ListHead) (prev *ListHead) {
 	var err error
-	prev = head.prev
+	stepAt("prev.waitNoMark", head, nil, nil)
+	prev = nodePrev(head)
 	for retry := 100; retry > 0; retry-- {
 		if !prev.IsMarked() {
 			err = nil
 			break
 		}
 		err = ErrMarked
-		prev = prevLoad(head)
+		prev = nodePrev(head)
 	}
 
 	if err != nil {
@@ -317,7 +325,7 @@ func prevWaitNoMark(head *ListHead) (prev *ListHead) {
 
 func prevSkipMark(head *ListHead) (prev *ListHead) {
 	var err error
-	prev = head.prev
+	prev = nodePrev(head)
 	for retry := 100; retry > 0; retry-- {
 		if !prev.IsMarked() {
 			err = nil
@@ -336,6 +344,20 @@ func prevSkipMark(head *ListHead) (prev *ListHead) {
 	return prev
 }
 
+// traverseType returns the traverse type of one Prev or Next call: the type
+// of DefaultModeTraverse changed by opts. opts apply to a copy, so that
+// calls running at the same time do not take the options of each other.
+func traverseType(opts []TravOpt) TraverseType {
+	if len(opts) == 0 {
+		return DefaultModeTraverse.Type()
+	}
+	mode := ModeTraverse{t: DefaultModeTraverse.Type()}
+	for _, opt := range opts {
+		opt(&mode)
+	}
+	return mode.Type()
+}
+
 func (head *ListHead) Prev(opts ...TravOpt) *ListHead {
 	//return ListPrev(head, opts...)
 	return ListPrev(head, opts...)
@@ -347,12 +369,11 @@ func ListPrev(head *ListHead, opts ...TravOpt) (prev *ListHead) {
 	// }
 	// return prevDefault(head, opts...)
 
+	t := DefaultModeTraverse.Type()
 	if len(opts) > 0 {
-		pOpts := DefaultModeTraverse.Option(opts...)
-		defer DefaultModeTraverse.Option(pOpts...)
+		t = traverseType(opts)
 	}
-
-	switch DefaultModeTraverse.Type() {
+	switch t {
 	case TravDirect:
 		return prevDirect(head)
 	case TravWaitNoMark:
@@ -424,7 +445,7 @@ func prevDefault(head *ListHead, opts ...TravOpt) (prev *ListHead) {
 }
 
 func (head *ListHead) DirectNext() *ListHead {
-	return head.next
+	return nextLoad(head)
 }
 
 func (head *ListHead) PtrNext() **ListHead {
@@ -433,7 +454,7 @@ func (head *ListHead) PtrNext() **ListHead {
 }
 
 func (head *ListHead) DirectPrev() *ListHead {
-	return head.prev
+	return prevLoad(head)
 }
 
 type BoolAndError struct {
@@ -502,10 +523,13 @@ func (head *ListHead) rewriteResultOnPrev(mode ModeTraverse, prev *ListHead, oex
 	return oexit, oerr
 }
 
+// nextDirect returns the node head.next leads to, without the mark bit that
+// a delete of head puts on the link, as nextDirect of elist_head does.
 func nextDirect(head *ListHead) (next *ListHead) {
-	return nextLoad(head)
+	return nodeNext(head)
 }
 
+//go:nocheckptr
 func nextLoad(head *ListHead) (next *ListHead) {
 	next = (*ListHead)(atomic.LoadPointer((*unsafe.Pointer)(unsafe.Pointer(&head.next))))
 	return next
@@ -513,14 +537,14 @@ func nextLoad(head *ListHead) (next *ListHead) {
 
 func nextWaitNoMark(head *ListHead) (next *ListHead) {
 	var err error
-	next = head.next
+	next = nodeNext(head)
 	for retry := 100; retry > 0; retry-- {
 		if !next.IsMarked() {
 			err = nil
 			break
 		}
 		err = ErrMarked
-		next = nextLoad(head)
+		next = nodeNext(head)
 	}
 
 	if err != nil {
@@ -533,7 +557,7 @@ func nextWaitNoMark(head *ListHead) (next *ListHead) {
 
 func nextSkipMark(head *ListHead) (next *ListHead) {
 	var err error
-	next = head.next
+	next = nodeNext(head)
 	for retry := 100; retry > 0; retry-- {
 		if !next.IsMarked() {
 			err = nil
@@ -558,12 +582,11 @@ func (head *ListHead) Next(opts ...TravOpt) *ListHead {
 }
 
 func ListNext(head *ListHead, opts ...TravOpt) *ListHead {
+	t := DefaultModeTraverse.Type()
 	if len(opts) > 0 {
-		prevs := DefaultModeTraverse.Option(opts...)
-		defer DefaultModeTraverse.Option(prevs...)
+		t = traverseType(opts)
 	}
-
-	switch DefaultModeTraverse.Type() {
+	switch t {
 	case TravDirect:
 		return nextDirect(head)
 	case TravWaitNoMark:
@@ -760,7 +783,7 @@ func (head *ListHead) next3() (next *ListHead, err error) {
 	if unsafe.Pointer(head) == headNext {
 		return nil, ErrEmpty
 	}
-	if unsafe.Pointer(head) == unsafe.Pointer(uintptr(headNext)^1) {
+	if uintptr(unsafe.Pointer(head)) == uintptr(headNext)^1 {
 		return nil, ErrMarked
 	}
 	if (*ListHead)(headNext).isMarkedForDeleteWithoutError() {
@@ -817,13 +840,14 @@ func (mu *mutex) Unlock() {
 
 var mu4Add *mutex = newMutex(false)
 
-//  prev ---------------> next
-//        \--> new --/
-//   prev --> next     prev ---> new
+// prev ---------------> next
+//
+//	     \--> new --/
+//	prev --> next     prev ---> new
 func listAddWitCas(new, prev, next *ListHead, fn func(*ListHead) *sync.RWMutex) (err error) {
 	// backup for roolback
-	oNewPrev := uintptr(unsafe.Pointer(new.prev))
-	oNewNext := uintptr(unsafe.Pointer(new.next))
+	oNewPrev := prevLoad(new)
+	oNewNext := nextLoad(new)
 	if fn != nil {
 		if !prev.Empty() {
 			fn(prev).Lock()
@@ -835,8 +859,8 @@ func listAddWitCas(new, prev, next *ListHead, fn func(*ListHead) *sync.RWMutex) 
 		}
 	}
 	rollback := func(new *ListHead) {
-		StoreListHead(&new.prev, (*ListHead)(unsafe.Pointer(oNewPrev)))
-		StoreListHead(&new.next, (*ListHead)(unsafe.Pointer(oNewNext)))
+		StoreListHead(&new.prev, oNewPrev)
+		StoreListHead(&new.next, oNewNext)
 	}
 	_ = rollback
 
@@ -846,17 +870,28 @@ func listAddWitCas(new, prev, next *ListHead, fn func(*ListHead) *sync.RWMutex) 
 
 	mu4Add.Lock()
 	defer mu4Add.Unlock()
+	stepAt("add.cas1", new, prev, next)
+	// an insert before next waits while next is half inserted: the node after
+	// next does not link back to next yet
+	if nn := nodeNext(next); nn != next && nodePrev(nn) != next {
+		goto ROLLBACK
+	}
 	if !Cas(&prev.next, next, new) {
 		goto ROLLBACK
 	}
+	stepAt("add.cas2", new, prev, next)
 	if !Cas(&next.prev, prev, new) {
 
-		if !Cas(&prev.next, new, next) {
-			_ = "fail rollback?"
+		stepAt("add.rollback", new, prev, next)
+		// take new out as a delete of new does, so that a delete of next
+		// that passed over the link from prev to new sees it removed. new
+		// keeps its marked links like any deleted node, so that the nodes
+		// next to it are not taken as safe to reuse through it
+		if err := new.MarkForDelete(); err != nil {
+			return err
 		}
-
-		goto ROLLBACK
-
+		return NewError(ErrTCasConflictOnAdd,
+			fmt.Errorf("listAddWithCas() please retry: new=%s prev=%s next=%s", new.P(), prev.P(), next.P()))
 	}
 
 	return nil
@@ -888,6 +923,7 @@ func (l *ListHead) MarkForDelete(opts ...TravOpt) (err error) {
 	if !l.canPurge() {
 		return ErrNotMarked
 	}
+	stepAt("del.purgeable", l, nil, nil)
 	mu4Add.Lock()
 	defer mu4Add.Unlock()
 
@@ -899,9 +935,10 @@ func (l *ListHead) MarkForDelete(opts ...TravOpt) (err error) {
 	)
 	_, _ = ErrDeketeStep2, ErrDeketeStep3
 
-	err = retry(100, func(retry int) (fin bool, err error) {
-		prev1 := l.prev.WithOutMark()
-		next1 := l.next.WithOutMark()
+	try := func(retry int) (fin bool, err error) {
+		prev1 := prevLoad(l).WithOutMark()
+		next1 := nextLoad(l).WithOutMark()
+		stepAt("del.begin", l, prev1, next1)
 		//prev1 := (*ListHead)(unsafe.Pointer(uintptr(unsafe.Pointer(l.prev)) & mask))
 		//next1 := (*ListHead)(unsafe.Pointer(uintptr(unsafe.Pointer(l.next)) & mask))
 		if mode.Mu != nil {
@@ -920,25 +957,27 @@ func (l *ListHead) MarkForDelete(opts ...TravOpt) (err error) {
 		prev := prev1
 		next := next1
 
-		if retry > 50 {
-			fmt.Printf("retry > 50\n")
-
+		if retry > 0 {
+			// a neighbor is in the middle of an insert or a delete
+			runtime.Gosched()
 		}
 
 		if !MarkListHead(&l.next, next) {
 			AddRecoverState("remove: retry marked next")
 			return false, ErrDeketeStep0
 		}
+		stepAt("del.nextMarked", l, prev1, next1)
 		if !MarkListHead(&l.prev, prev) {
 			AddRecoverState("remove: retry marked prev")
 			return false, ErrDeketeStep1
 		}
+		stepAt("del.marked", l, prev1, next1)
 		if !prev1.Empty() && mode.Mu != nil {
 			mode.Mu(prev1).Lock()
 			defer mode.Mu(prev1).Unlock()
 		}
-		prev2 := PrevNoM(l.prev)
-		next2 := NextNoM(l.next)
+		prev2 := PrevNoM(prevLoad(l))
+		next2 := NextNoM(nextLoad(l))
 		if mode.Mu != nil {
 			if !prev2.Empty() {
 				mode.Mu(prev2).Lock()
@@ -952,47 +991,37 @@ func (l *ListHead) MarkForDelete(opts ...TravOpt) (err error) {
 
 		_, _ = prev2, next2
 
-		prevs := []**ListHead{&prev1.next, &prev2.next}
-		nexts := []**ListHead{&next1.prev, &next2.prev}
-
-		t := false
-		_ = t
-		for i, pn := range prevs {
-			_ = i
-			if *pn != l {
-				continue
-			}
-			next := next1
-			if next.IsMarked() {
-				next = next2
-			}
-			t = Cas(prevs[i], l, next)
+		// relink the links to l from the nearest nodes that are not marked,
+		// passing the marked nodes between them and l. An insert that has
+		// made only its first CAS next to l is waited for: it either
+		// finishes or removes its node.
+		if halfInsertedBefore(l) {
+			return false, ErrDeketeStep2
 		}
-
-		for i, np := range nexts {
-			_ = i
-			if *np != l {
-				continue
-			}
-			prev := prev1
-			if prev.IsMarked() {
-				prev = prev2
-			}
-			t = Cas(np, l, prev)
+		if x, v := linkingPrev(l); x != nil && uintptr(unsafe.Pointer(v))&1 == 0 {
+			next := NextNoM(nextLoad(l))
+			stepAt("del.relinkNext", l, nil, next)
+			Cas(&x.next, v, next)
 		}
-
-		for i, toL := range append(prevs, nexts...) {
-			_ = i
-			if l == *toL {
-				AddRecoverState("remove: found node to me")
-				return false, ErrDeketeStep2
-			}
+		if halfInsertedAfter(l) {
+			return false, ErrDeketeStep2
 		}
-
-		prev2 = PrevNoM(l.prev)
-		next2 = NextNoM(l.next)
+		if z, v := linkingNext(l); z != nil && uintptr(unsafe.Pointer(v))&1 == 0 {
+			Cas(&z.prev, v, linkedBefore(l, z))
+		}
+		stepAt("del.check", l, prev1, next1)
+		if !l.unlinked() {
+			AddRecoverState("remove: found node to me")
+			return false, ErrDeketeStep2
+		}
 		return true, nil
-	})
+	}
+	for retry := 0; ; retry++ {
+		if fin, e := try(retry); fin {
+			err = e
+			break
+		}
+	}
 
 	if err != nil {
 		mode.e = err
@@ -1191,7 +1220,7 @@ func (l *ListHead) Empty() bool {
 			fmt.Fprintf(os.Stderr, "Empty(): recover return true listhead == nil")
 			return true
 		}
-		return l.prev == l || l.next == l
+		return prevLoad(l) == l || nextLoad(l) == l
 	}
 	return l.next == l
 }
@@ -1237,18 +1266,18 @@ func (l *ListHead) lenCc() (cnt int) {
 	retry := false
 	_ = retry
 RETRY:
+	cnt = 0
 	loopDetect = map[*ListHead]bool{}
 	for cur := l.Front(); !cur.Empty(); cur = cur.Next() {
-	EACH_RETRY:
 		if loopDetect[cur] {
 			fmt.Printf("loop")
 			retry = true
 			goto RETRY
 		}
 		loopDetect[cur] = true
-		if uintptr(unsafe.Pointer(cur.next))&1 > 0 {
-			loopDetect[cur] = false
-			goto EACH_RETRY
+		stepAt("len.current", cur, nil, nil)
+		if uintptr(unsafe.Pointer(nextLoad(cur)))&1 > 0 {
+			goto RETRY
 		}
 
 		cnt++
@@ -1314,22 +1343,29 @@ func (l *ListHead) front() (head *ListHead) {
 	return
 }
 
+// frontPrev returns the nearest node before head that is not marked, for the
+// walk of frontCc.
+func frontPrev(head *ListHead) *ListHead {
+	stepAt("front.prev", head, nil, nil)
+	return PrevNoM(prevLoad(head))
+}
+
 func (l *ListHead) frontCc() (head *ListHead) {
 
 	defer func() {
 		retryed := false
 	RETRY:
-		if head.prev == head && head.next != head {
+		if prevLoad(head) == head && nextLoad(head) != head {
 			if retryed {
 				// FIXME: log warning
 				//fmt.Printf("start terminate? head.next.Empty()=%v\n", head.next.Empty())
 				_ = "head empty"
 			}
-			head = head.next
+			head = nextLoad(head)
 			retryed = true
 			goto RETRY
 		}
-		if head.prev != head && head.next == head {
+		if prevLoad(head) != head && nextLoad(head) == head {
 			_ = "end terminate?"
 			return
 		}
@@ -1354,10 +1390,10 @@ func (l *ListHead) frontCc() (head *ListHead) {
 	_ = next
 
 	isInfinit := map[*ListHead]int{}
-
 RESTART:
-	for next, head = start, start.Prev(WaitNoM()); !head.Prev(WaitNoM()).Empty(); next, head = head, head.Prev(WaitNoM()) {
-
+	// walk over the nodes being deleted instead of waiting for them, which
+	// gives up with nil after 100 reads
+	for head, next = start, start; !frontPrev(head).Empty(); next, head = head, frontPrev(head) {
 	RETRY_IN_LOOP:
 		if head.IsMarked() {
 			head = next.Prev(WaitNoM())
@@ -1479,6 +1515,7 @@ func (cur *Cursor) Next() bool {
 		return false
 	}
 
+	stepAt("cursor.next", cur.Pos, nil, nil)
 	if cur.Pos == cur.Pos.Next() {
 		return false
 	}
@@ -1652,16 +1689,16 @@ func (head *ListHead) Purge(opts ...func(*ListHead) error) (active *ListHead, pu
 func (head *ListHead) AvoidNotAppend(err error) *ListHead {
 	switch err {
 	case ErrNotAppend:
-		if head.Prev().isMarkedForDeleteWithoutError() {
-			return head.Prev().AvoidNotAppend(ErrMarked)
+		if nodePrev(head).isMarkedForDeleteWithoutError() {
+			return nodePrev(head).AvoidNotAppend(ErrMarked)
 		}
-		return head.Prev()
+		return nodePrev(head)
 	case ErrMarked:
-		if head.Prev() == head {
+		if nodePrev(head) == head {
 			return head
 		}
-		if head.Prev().isMarkedForDeleteWithoutError() {
-			return head.Prev().AvoidNotAppend(err)
+		if nodePrev(head).isMarkedForDeleteWithoutError() {
+			return nodePrev(head).AvoidNotAppend(err)
 		}
 		//TODO: other error pattern
 	}
@@ -1683,11 +1720,11 @@ func (head *ListHead) ActiveList() *ListHead {
 
 func (head *ListHead) canPurge() bool {
 
-	if head.prev == head {
+	if prevLoad(head) == head {
 		return false
 	}
 
-	if head.next == head {
+	if nextLoad(head) == head {
 		return false
 	}
 	return true
@@ -1695,7 +1732,7 @@ func (head *ListHead) canPurge() bool {
 
 func (head *ListHead) canAdd() bool {
 
-	if head.next == head {
+	if head.DirectNext() == head {
 		return false
 	}
 	return true
@@ -1721,29 +1758,144 @@ func retry(cnt int, fn func(retry int) (done bool, err error)) error {
 	return NewError(ErrTOverRetyry, fmt.Errorf("reach retry limit err=%+v", stats))
 }
 
+// PrevNoM returns the nearest node that is not marked, starting at the node
+// oprev leads to and walking backward over the marked nodes. The mark bit of
+// oprev itself belongs to the node holding the link, not to the node it
+// leads to.
+//
 //go:nocheckptr
 func PrevNoM(oprev *ListHead) *ListHead {
 
-	prev := uintptr(unsafe.Pointer(oprev))
-	mask := uintptr(^uint(0)) ^ 1
-	if uintptr(prev)&1 == 0 {
-		return oprev
+	prev := oprev.WithOutMark()
+	if nodePrev(prev) == prev || !prev.IsMarked() {
+		return prev
 	}
-
-	return PrevNoM((*ListHead)(unsafe.Pointer(uintptr(unsafe.Pointer(oprev)) & mask)).prev)
+	return PrevNoM(prevLoad(prev))
 
 }
 
+// NextNoM returns the nearest node that is not marked, starting at the node
+// ocur leads to and walking forward over the marked nodes.
+//
 //go:nocheckptr
 func NextNoM(ocur *ListHead) *ListHead {
 
-	cur := uintptr(unsafe.Pointer(ocur))
-	mask := uintptr(^uint(0)) ^ 1
-	if uintptr(cur)&1 == 0 {
-		return ocur
+	next := ocur.WithOutMark()
+	if nodeNext(next) == next || !next.IsMarked() {
+		return next
 	}
+	return NextNoM(nextLoad(next))
+}
 
-	return NextNoM((*ListHead)(unsafe.Pointer(uintptr(unsafe.Pointer(cur)) & mask)).next)
+// nodePrev and nodeNext load a link of head and drop its mark bit.
+//
+//go:nocheckptr
+func nodePrev(head *ListHead) *ListHead {
+	return prevLoad(head).WithOutMark()
+}
+
+//go:nocheckptr
+func nodeNext(head *ListHead) *ListHead {
+	return nextLoad(head).WithOutMark()
+}
+
+// linkingPrev returns the nearest node before head that is not marked and
+// the value of its next, when that next leads to head passing only marked
+// nodes. It returns nil when no such link is left.
+//
+//go:nocheckptr
+func linkingPrev(head *ListHead) (*ListHead, *ListHead) {
+	x := PrevNoM(prevLoad(head))
+	v := nextLoad(x)
+	for cur := nodeNext(x); cur != x; cur = nodeNext(cur) {
+		if cur == head {
+			return x, v
+		}
+		if !cur.IsMarked() || nodeNext(cur) == cur {
+			break
+		}
+	}
+	return nil, nil
+}
+
+// linkingNext returns the nearest node after head that is not marked and
+// the value of its prev, when that prev leads to head passing only marked
+// nodes. It returns nil when no such link is left.
+//
+//go:nocheckptr
+func linkingNext(head *ListHead) (*ListHead, *ListHead) {
+	z := NextNoM(nextLoad(head))
+	v := prevLoad(z)
+	for cur := nodePrev(z); cur != z; cur = nodePrev(cur) {
+		if cur == head {
+			return z, v
+		}
+		if !cur.IsMarked() || nodePrev(cur) == cur {
+			break
+		}
+	}
+	return nil, nil
+}
+
+// halfInsertedBefore reports whether a node that is not marked links to
+// head by its next while the node before it does not link to head: an
+// insert before head has made its first CAS and not its second.
+//
+//go:nocheckptr
+func halfInsertedBefore(head *ListHead) bool {
+	x := PrevNoM(prevLoad(head))
+	for cur := nodeNext(x); cur != x && cur != head; cur = nodeNext(cur) {
+		if nodeNext(cur) == cur {
+			return false
+		}
+		if !cur.IsMarked() {
+			return nodeNext(cur) == head
+		}
+	}
+	return false
+}
+
+// halfInsertedAfter reports whether the nearest node after head that is not
+// marked is linked from head while the node after it still links back to
+// head: an insert after head has made its first CAS and not its second.
+//
+//go:nocheckptr
+func halfInsertedAfter(head *ListHead) bool {
+	z := NextNoM(nextLoad(head))
+	if z == head || nodeNext(z) == z {
+		return false
+	}
+	return nodePrev(nodeNext(z)) == head
+}
+
+// linkedBefore returns the node whose next is z, walking forward from the
+// nearest node before head that is not marked, or that node when the walk
+// does not reach z.
+//
+//go:nocheckptr
+func linkedBefore(head, z *ListHead) *ListHead {
+	x := PrevNoM(prevLoad(head))
+	for cur := x; nodeNext(cur) != cur; cur = nodeNext(cur) {
+		if nodeNext(cur) == z {
+			return cur
+		}
+		if nodeNext(cur) == x {
+			break
+		}
+	}
+	return x
+}
+
+// unlinked reports whether no node that is not marked links to head any
+// more, and no insert next to head is between its two CASes.
+func (head *ListHead) unlinked() bool {
+	if x, _ := linkingPrev(head); x != nil {
+		return false
+	}
+	if z, _ := linkingNext(head); z != nil {
+		return false
+	}
+	return !halfInsertedBefore(head) && !halfInsertedAfter(head)
 }
 
 func LastNoM(ocur *ListHead) *ListHead {
@@ -1800,10 +1952,10 @@ func (head *ListHead) findPrevNoM(exptected *ListHead) (*ListHead, int) {
 
 func (head *ListHead) IsMarked() bool {
 
-	if uintptr(unsafe.Pointer(head.prev))&1 > 0 {
+	if uintptr(unsafe.Pointer(prevLoad(head)))&1 > 0 {
 		return true
 	}
-	if uintptr(unsafe.Pointer(head.next))&1 > 0 {
+	if uintptr(unsafe.Pointer(nextLoad(head)))&1 > 0 {
 		return true
 	}
 	return false
@@ -1811,20 +1963,24 @@ func (head *ListHead) IsMarked() bool {
 
 func (head *ListHead) IsSafety() (bool, error) {
 
-	prev := PrevNoM(head.prev)
-	next := NextNoM(head.next)
+	prev := PrevNoM(prevLoad(head))
+	next := NextNoM(nextLoad(head))
+	stepAt("safety.nodes", head, prev, next)
 
-	if prev.next.IsMarked() {
+	if nodeNext(prev).IsMarked() {
 		return false, nil
 	}
 
-	if next.prev.IsMarked() {
+	if nodePrev(next).IsMarked() {
 		return false, nil
 	}
-	if prev.next == head {
+	if nodeNext(prev) == head {
 		return false, nil
 	}
-	if next.prev == head {
+	if nodePrev(next) == head {
+		return false, nil
+	}
+	if !head.unlinked() {
 		return false, nil
 	}
 
