@@ -47,9 +47,16 @@ var (
 	ErrNotAppend         error = NewError(ErrTNotAppend, errors.New("element cannot be append"))
 	ErrNotMarked         error = NewError(ErrTNotMarked, errors.New("elenment cannot be marked"))
 	ErrCasConflictOnMark error = NewError(ErrTCasConflictOnMark, errors.New("cas conflict(fail mark)"))
-	ErrFirstMarked       error = NewError(ErrTFirstMarked, errors.New("first element is marked"))
-	ErrNoSafetyOnAdd     error = NewError(ErrTNoSafety, errors.New("element is not safety to append"))
-	ErrNoContinous       error = NewError(ErrTNoContinous, errors.New("element is not continus"))
+	// ErrCasConflictOnAdd is what an insert returns when another insert or
+	// delete changed the links first; the caller finds the position again
+	ErrCasConflictOnAdd error = NewError(ErrTCasConflictOnAdd, errors.New("cas conflict(fail add)"))
+
+	errDeleteStep0         = errors.New("fail step 0")
+	errDeleteStep1         = errors.New("fail step 1")
+	errDeleteStep2         = errors.New("fail step 2")
+	ErrFirstMarked   error = NewError(ErrTFirstMarked, errors.New("first element is marked"))
+	ErrNoSafetyOnAdd error = NewError(ErrTNoSafety, errors.New("element is not safety to append"))
+	ErrNoContinous   error = NewError(ErrTNoContinous, errors.New("element is not continus"))
 	//ErrNoSafety          error = NewError(ErrTNoSafety, errors.New("element is not safety to append"))
 )
 
@@ -890,8 +897,7 @@ func listAddWitCas(new, prev, next *ListHead, fn func(*ListHead) *sync.RWMutex) 
 		if err := new.MarkForDelete(); err != nil {
 			return err
 		}
-		return NewError(ErrTCasConflictOnAdd,
-			fmt.Errorf("listAddWithCas() please retry: new=%s prev=%s next=%s", new.P(), prev.P(), next.P()))
+		return ErrCasConflictOnAdd
 	}
 
 	return nil
@@ -899,8 +905,9 @@ func listAddWitCas(new, prev, next *ListHead, fn func(*ListHead) *sync.RWMutex) 
 ROLLBACK:
 
 	rollback(new)
-	return NewError(ErrTCasConflictOnAdd,
-		fmt.Errorf("listAddWithCas() please retry: new=%s prev=%s next=%s", new.P(), prev.P(), next.P()))
+	// a static error: the insert retries on it, many times under
+	// contention, and formatting the links allocated on every try
+	return ErrCasConflictOnAdd
 
 }
 
@@ -926,14 +933,6 @@ func (l *ListHead) MarkForDelete(opts ...TravOpt) (err error) {
 	stepAt("del.purgeable", l, nil, nil)
 	mu4Add.Lock()
 	defer mu4Add.Unlock()
-
-	var (
-		ErrDeketeStep0 error = errors.New("fail step 0")
-		ErrDeketeStep1 error = errors.New("fail step 1")
-		ErrDeketeStep2 error = errors.New("fail step 2")
-		ErrDeketeStep3 error = errors.New("fail step 3")
-	)
-	_, _ = ErrDeketeStep2, ErrDeketeStep3
 
 	try := func(retry int) (fin bool, err error) {
 		prev1 := prevLoad(l).WithOutMark()
@@ -964,12 +963,12 @@ func (l *ListHead) MarkForDelete(opts ...TravOpt) (err error) {
 
 		if !MarkListHead(&l.next, next) {
 			AddRecoverState("remove: retry marked next")
-			return false, ErrDeketeStep0
+			return false, errDeleteStep0
 		}
 		stepAt("del.nextMarked", l, prev1, next1)
 		if !MarkListHead(&l.prev, prev) {
 			AddRecoverState("remove: retry marked prev")
-			return false, ErrDeketeStep1
+			return false, errDeleteStep1
 		}
 		stepAt("del.marked", l, prev1, next1)
 		if !prev1.Empty() && mode.Mu != nil {
@@ -996,7 +995,7 @@ func (l *ListHead) MarkForDelete(opts ...TravOpt) (err error) {
 		// made only its first CAS next to l is waited for: it either
 		// finishes or removes its node.
 		if halfInsertedBefore(l) {
-			return false, ErrDeketeStep2
+			return false, errDeleteStep2
 		}
 		if x, v := linkingPrev(l); x != nil && uintptr(unsafe.Pointer(v))&1 == 0 {
 			next := NextNoM(nextLoad(l))
@@ -1004,7 +1003,7 @@ func (l *ListHead) MarkForDelete(opts ...TravOpt) (err error) {
 			Cas(&x.next, v, next)
 		}
 		if halfInsertedAfter(l) {
-			return false, ErrDeketeStep2
+			return false, errDeleteStep2
 		}
 		if z, v := linkingNext(l); z != nil && uintptr(unsafe.Pointer(v))&1 == 0 {
 			Cas(&z.prev, v, linkedBefore(l, z))
@@ -1012,7 +1011,7 @@ func (l *ListHead) MarkForDelete(opts ...TravOpt) (err error) {
 		stepAt("del.check", l, prev1, next1)
 		if !l.unlinked() {
 			AddRecoverState("remove: found node to me")
-			return false, ErrDeketeStep2
+			return false, errDeleteStep2
 		}
 		return true, nil
 	}
